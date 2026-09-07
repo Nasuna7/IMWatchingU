@@ -1,0 +1,1 @@
+"""Immutable RGB capture adapters."""

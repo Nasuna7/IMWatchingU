@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "source_commit_probed": "eecb02140f77b58cb70a3ec8c0b2e816a346f3fe",
+  "verified_packages": [],
+  "release_ready": false,
+  "reason": "开发构建可随包复制本机 NapCat Shell，但尚无锁定版本摘要、QQ 原生配置及扫码收发真机验证记录。源码探测不等于运行时兼容验证。"
+}
