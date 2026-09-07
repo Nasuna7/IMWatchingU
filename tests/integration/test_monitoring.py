@@ -162,17 +162,17 @@ async def test_recognize_once_uses_monitor_roi_not_preview_or_image_roi(tmp_path
     assert ocr.frames[0].height == 40
 
 
-async def test_select_source_does_not_capture_preview_or_touch_ocr(tmp_path, frame, target):
+async def test_select_source_captures_static_preview_without_touching_ocr(tmp_path, frame, target):
     ocr = Ocr()
     app, events = create(tmp_path, frame, target, ocr)
 
     await app.select_source(type("Source", (), {"title": "synthetic"})())
 
     assert app.source is not None
-    assert app.last_preview is None
-    assert app.last_frame is None
+    assert app.last_preview is not None
+    assert app.last_frame is not None
     assert ocr.calls == 0
-    assert not any(kind == "frame" for kind, _ in events)
+    assert [kind for kind, _ in events].count("frame") == 1
 
 
 async def test_inactive_roi_change_does_not_update_preview(tmp_path, frame, target):

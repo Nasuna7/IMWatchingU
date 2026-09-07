@@ -142,6 +142,16 @@ def main():
 
         return list_sources()
 
+    def load_monitor_tasks():
+        return settings.values.get("capture", {}).get("tasks", [])
+
+    def save_monitor_tasks(configs):
+        import copy
+
+        values = copy.deepcopy(settings.values)
+        values.setdefault("capture", {})["tasks"] = configs
+        settings.save(values)
+
     monitor = MonitorTasks(
         lambda task_id, emit: Monitoring(
             LazyCapture(),
@@ -154,6 +164,8 @@ def main():
             emit,
         ),
         bridge.publish,
+        load_monitor_tasks,
+        save_monitor_tasks,
     )
     credentials = Credentials(server_name)
     qq_service = QQService(messaging, bridge.publish)

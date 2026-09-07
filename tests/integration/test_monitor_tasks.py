@@ -90,3 +90,132 @@ def test_scoped_cancellation_does_not_cancel_other_task_current_send(frame, targ
     queue.current = queue.pending.pop()
     first.cancel()
     assert not queue.pending and queue.current.task_id not in queue.cancelled
+
+
+
+async def test_monitor_tasks_persist_and_restore_window_by_process_name(tmp_path, frame, target):
+    frame = replace(frame, width=100, height=80, rgb=bytes([255, 0, 0]) * 8000)
+    saved = []
+    queue = SendQueue(SimpleNamespace(online=True, targets=[target]), lambda _: b"png")
+    db = Database(tmp_path / "restore.db")
+    db.save_rule(KeywordRule("test"))
+    db.save_policy(SendPolicy(target=target))
+    settings = Settings(tmp_path / "settings.json")
+
+    class Capture:
+        def __init__(self):
+            self.opened = []
+
+        def open(self, source):
+            self.opened.append(source)
+
+        def grab(self, session, roi):
+            return replace(frame, session_id=session)
+
+        def close(self):
+            pass
+
+    class Ocr:
+        async def availability(self, _):
+            pass
+
+        async def recognize(self, frame, _):
+            return OcrResult(frame, "fake", "test", 1)
+
+        async def shutdown(self):
+            pass
+
+    def factory(task_id, emit):
+        return Monitoring(
+            Capture(), Ocr(), TaskQueue(queue, task_id), queue.messaging, db, settings, lambda _: "红", emit
+        )
+
+    first_source = SimpleNamespace(
+        id="window:111",
+        stable_id="eve-character:regular decending semitone",
+        title="EVE - Regular Decending Semitone",
+        kind="window",
+        metadata=(111, "EVE - Regular Decending Semitone", 1001, "exefile.exe"),
+    )
+    manager = MonitorTasks(factory, lambda *event: None, lambda: [], lambda configs: saved.append(configs))
+    await manager.current.select_source(first_source, (0.1, 0.2, 0.3, 0.4))
+    manager.current.image_roi = (0.2, 0.3, 0.4, 0.5)
+    manager.current.keywords = True
+    manager.current.flash_enabled = True
+    manager.persist()
+
+    restored = MonitorTasks(factory, lambda *event: None, lambda: saved[-1], lambda configs: saved.append(configs))
+    new_source = SimpleNamespace(
+        id="window:999",
+        stable_id="eve-character:regular decending semitone",
+        title="EVE - Regular Decending Semitone",
+        kind="window",
+        metadata=(999, "EVE - Regular Decending Semitone", 2002, "exefile.exe"),
+    )
+
+    await restored.restore_sources([new_source])
+
+    app = restored.current
+    assert app.source is new_source
+    assert app.roi == (0.1, 0.2, 0.3, 0.4)
+    assert app.image_roi == (0.2, 0.3, 0.4, 0.5)
+    assert app.keywords is True and app.flash_enabled is True
+    assert saved[-1][0]["source"]["stable_id"] == "eve-character:regular decending semitone"
+
+
+async def test_monitor_tasks_keep_unresolved_saved_source_until_refresh(tmp_path, frame, target):
+    saved_config = [
+        {
+            "id": "task-a",
+            "name": "任务 1",
+            "source": {
+                "id": "window:111",
+                "stable_id": "eve-character:7th life v",
+                "title": "EVE - 7th life V",
+                "kind": "window",
+                "process_name": "exefile.exe",
+            },
+            "roi": [0, 0, 0.5, 1],
+            "image_roi": [0.25, 0, 0.5, 1],
+            "keywords": False,
+            "flash": True,
+        }
+    ]
+    queue = SendQueue(SimpleNamespace(online=True, targets=[target]), lambda _: b"png")
+    db = Database(tmp_path / "unresolved.db")
+    db.save_policy(SendPolicy(target=target))
+    settings = Settings(tmp_path / "settings.json")
+
+    class Capture:
+        def open(self, source):
+            pass
+
+        def grab(self, session, roi):
+            return frame
+
+        def close(self):
+            pass
+
+    class Ocr:
+        async def availability(self, _):
+            pass
+
+        async def recognize(self, frame, _):
+            return OcrResult(frame, "fake", "", 1)
+
+    manager = MonitorTasks(
+        lambda task_id, emit: Monitoring(
+            Capture(), Ocr(), TaskQueue(queue, task_id), queue.messaging, db, settings, lambda _: "红", emit
+        ),
+        lambda *event: None,
+        lambda: saved_config,
+        lambda configs: None,
+    )
+
+    await manager.restore_sources([])
+
+    assert manager.current.source is None
+    assert manager.current.saved_source["stable_id"] == "eve-character:7th life v"
+    assert manager.current.roi == (0, 0, 0.5, 1)
+    assert manager.current.image_roi == (0.25, 0, 0.5, 1)
+    assert manager.current.keywords is False and manager.current.flash_enabled is True

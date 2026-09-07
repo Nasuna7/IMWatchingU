@@ -137,6 +137,7 @@ class Presenter(QObject):
 
     async def initialize(self):
         await self.app.reload()
+        await self.refresh_sources()
         self.emit(
             "credentials",
             (
@@ -149,7 +150,9 @@ class Presenter(QObject):
             self.emit("record", f"{row[0]} · {row[2]} · {row[1]} · {'测试' if row[5] else '自动'}")
 
     async def refresh_sources(self):
-        self.emit("sources", await asyncio.to_thread(self.list_sources))
+        sources = await asyncio.to_thread(self.list_sources)
+        self.emit("sources", sources)
+        await self.app.restore_sources(sources)
 
     async def select(self):
         # Snapshot UI selection before scheduling is preferable; this coroutine only consumes stored data.
@@ -499,14 +502,14 @@ class Presenter(QObject):
             use_default,
         )
         await self.app.reload()
-        self.emit("info", "导入已保存；原 legacy 文件未修改")
+        self.emit("info", "导入已保存；源文件未修改")
 
     def export_file(self):
         path, chosen = QFileDialog.getSaveFileName(
             self.window,
             "导出关键词（TXT 不含发送策略；完整保存请选择 JSON）",
             "keywords.json",
-            "完整规则 (*.json);;旧版关键词 (*.txt)",
+            "完整规则 (*.json);;关键词文本 (*.txt)",
         )
         if path:
             self.run(self.write_export(path))

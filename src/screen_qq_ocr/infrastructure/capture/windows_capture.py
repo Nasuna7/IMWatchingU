@@ -1,5 +1,6 @@
 import ctypes
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +21,32 @@ class CaptureSource:
     title: str
     kind: str
     metadata: tuple
+    stable_id: str = ""
+
+    def __post_init__(self):
+        if not self.stable_id:
+            object.__setattr__(self, "stable_id", self.id)
+
+
+EVE_WINDOW_TITLE_PATTERN = re.compile(r"^EVE - (?P<character>\S.*)$")
+
+
+def eve_character_name(title):
+    match = EVE_WINDOW_TITLE_PATTERN.match(title.strip()) if isinstance(title, str) else None
+    return match.group("character").strip() if match else ""
+
+
+def valid_window_process_name(name):
+    return bool(eve_character_name(name))
+
+
+def eve_window_stable_id(title):
+    character = eve_character_name(title)
+    return f"eve-character:{character.casefold()}" if character else ""
+
+
+def source_identity(source):
+    return getattr(source, "stable_id", "") or source.id
 
 
 def list_sources():
@@ -30,6 +57,7 @@ def list_sources():
                 f"显示器 {i}{'（主显示器）' if m.get('is_primary') else ''} · {m['width']}×{m['height']} · ({m['left']}, {m['top']})",
                 "monitor",
                 (m["left"], m["top"], m["width"], m["height"]),
+                f"monitor:{m['left']}:{m['top']}:{m['width']}:{m['height']}",
             )
             for i, m in enumerate(capture.monitors[1:], 1)
         ]
@@ -44,13 +72,22 @@ def list_sources():
             if user32.IsWindowVisible(ctypes.c_void_p(hwnd)) and pid.value != os.getpid():
                 title = ctypes.create_unicode_buffer(1024)
                 user32.GetWindowTextW(ctypes.c_void_p(hwnd), title, 1024)
-                if title.value:
+                process_name = ""
+                try:
+                    import psutil
+
+                    process_name = psutil.Process(pid.value).name()
+                except Exception:
+                    process_name = ""
+                stable_id = eve_window_stable_id(title.value)
+                if stable_id:
                     sources.append(
                         CaptureSource(
                             f"window:{hwnd}",
                             f"{title.value} · PID {pid.value}",
                             "window",
-                            (hwnd, title.value, pid.value),
+                            (hwnd, title.value, pid.value, process_name),
+                            stable_id,
                         )
                     )
             return True
@@ -79,14 +116,17 @@ class Capture:
         if source.kind == "window":
             from windows_capture import WindowsCapture
 
+            stable_id = source_identity(source)
             candidates = [
                 item
                 for item in list_sources()
-                if item.kind == "window" and source.metadata[1] in item.metadata[1]
+                if item.kind == "window" and source_identity(item) == stable_id
             ]
             # windows-capture 1.5 selects by substring, not HWND. Never silently select a different window.
-            if source.metadata[2] != os.getpid() and (len(candidates) != 1 or candidates[0].id != source.id):
-                raise ValueError("窗口标题已变化或存在同名窗口，请刷新来源；也可选择对应显示器")
+            if len(candidates) != 1:
+                raise ValueError("未找到唯一匹配的 EVE - 角色名窗口，请刷新来源并选择符合名称规范的窗口")
+            source = candidates[0]
+            self.source = source
             generation = self.generation
 
             capture = WindowsCapture(cursor_capture=False, draw_border=True, window_name=source.metadata[1])
@@ -127,7 +167,19 @@ class Capture:
             hwnd = ctypes.c_void_p(self.source.metadata[0])
             pid = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd) or pid.value != self.source.metadata[2]:
+            if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
+                raise ValueError("窗口已关闭或最小化，请恢复并重新选择")
+            if len(self.source.metadata) > 3:
+                try:
+                    import psutil
+
+                    if psutil.Process(pid.value).name() != self.source.metadata[3]:
+                        raise ValueError("窗口进程已变化，请刷新来源并重新选择")
+                except ValueError:
+                    raise
+                except Exception as error:
+                    raise ValueError("无法核验窗口进程，请刷新来源并重新选择") from error
+            elif pid.value != self.source.metadata[2]:
                 raise ValueError("窗口已关闭或最小化，请恢复并重新选择")
             with self.lock:
                 # WGC only delivers changed frames. A static window is still a valid source.

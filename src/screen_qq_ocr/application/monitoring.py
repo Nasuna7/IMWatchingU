@@ -55,10 +55,22 @@ class Monitoring:
         if source != self.source:
             self.source = None
             await self.capture_call(self.capture.open, source)
-        self.source = source
         self.roi = roi
-        self.emit("roi", roi)
-        self.emit("capture_status", "采集源已选择，开始监控后更新预览")
+        # WGC first frame may arrive asynchronously. Source selection captures one static preview;
+        # continuous preview refresh still only happens after monitoring starts.
+        for attempt in range(40):
+            try:
+                frame = await self.grab_frame(force_preview=True)
+                self.source = source
+                self.last_frame = frame
+                self.emit("roi", roi)
+                self.emit("capture_status", "采集已就绪")
+                return
+            except ValueError:
+                if attempt == 39:
+                    self.source = None
+                    raise
+                await asyncio.sleep(0.15)
 
     async def capture_call(self, function, *args):
         return await asyncio.get_running_loop().run_in_executor(

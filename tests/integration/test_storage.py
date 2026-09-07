@@ -1,5 +1,4 @@
 import hashlib
-from pathlib import Path
 
 import pytest
 
@@ -13,11 +12,14 @@ from screen_qq_ocr.infrastructure.persistence.keyword_files import (
 )
 
 
-def test_legacy_eleven_and_immutable_source(tmp_path):
-    path = Path(__file__).parents[2] / "legacy/keywords.txt"
+def test_txt_import_persists_rules_and_preserves_source(tmp_path):
+    path = tmp_path / "keywords.txt"
+    path.write_text("完成|2|任务完成\n警告|3|请检查状态\n就绪", encoding="utf-8-sig")
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     preview = parse_txt(path.read_text(encoding="utf-8-sig"))
-    assert not preview.errors and len(preview.rules) == 11
+    assert not preview.errors and len(preview.rules) == 3
+    assert [rule.min_count for rule in preview.rules] == [2, 3, 1]
+    assert preview.rules[0].send_overrides.body == "任务完成"
     db = Database(tmp_path / "app.db")
     db.import_rules(preview)
     restored = Database(tmp_path / "app.db").list_rules()
