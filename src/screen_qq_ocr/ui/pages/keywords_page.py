@@ -97,7 +97,7 @@ class KeywordsPage(QWidget):
         self.policy = PolicyEditor(overrides=True)
         editor_layout.addWidget(self.policy)
         buttons = QHBoxLayout()
-        save = QPushButton("保存规则")
+        save = QPushButton("应用")
         save.setProperty("variant", "primary")
         save.clicked.connect(self.submit)
         close = QPushButton("收起")
@@ -190,6 +190,10 @@ class KeywordsPage(QWidget):
             self.editing = rule
         except ValueError as error:
             self.error.emit(str(error))
+
+    def saved(self, rule):
+        if self.editing and self.editing.id == rule.id:
+            self.editor.accept()
 
     def remove(self):
         row = self.table.currentRow()

@@ -54,13 +54,15 @@ class Preview(QWidget):
             mask.addRect(self.selection())
             painter.fillPath(mask, QColor(0, 0, 0, 85))
             self.draw_roi(painter, self.image_selection(), QColor("#F1E6D6"))
-            self.draw_roi(painter, self.selection(), QColor("#D99C6C"))
-            painter.setBrush(QColor("white"))
-            for point in self.handles():
-                painter.drawRect(QRectF(point.x() - 4, point.y() - 4, 8, 8))
+            self.draw_roi(painter, self.selection(), QColor("#FFD54F"))
+            if self.editable:
+                painter.setBrush(QColor("white"))
+                for point in self.handles():
+                    painter.drawRect(QRectF(point.x() - 4, point.y() - 4, 8, 8))
 
     def draw_roi(self, painter, rect, color):
         painter.setPen(QPen(color, 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
 
     def set_roi(self, roi):
@@ -189,6 +191,9 @@ class Preview(QWidget):
             self.drag = (self.hit(event.position()), event.position(), self.roi, QRectF(self.rect))
 
     def mouseMoveEvent(self, event):
+        if not self.editable:
+            self.unsetCursor()
+            return
         if not self.image or self.rect.isEmpty():
             return
         if not self.drag:

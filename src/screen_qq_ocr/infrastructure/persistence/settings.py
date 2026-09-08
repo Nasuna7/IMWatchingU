@@ -30,7 +30,7 @@ def bundled_napcat():
 DEFAULTS = {
     "schema_version": 1,
     "ocr": {"engine": "windows", "interval": 3, "max_edge": 1920, "preprocess": True, "tesseract": ""},
-    "capture": {"source_id": "", "roi": [0, 0, 1, 1], "tasks": []},
+    "capture": {"source_id": "", "roi": [0, 0, 1, 1], "tasks": [], "read_interval": 5},
     "napcat": bundled_napcat(),
     "flash": {"enabled": False, "cooldown": 30, "sound": "双短鸣"},
     "appearance": {"reduce_motion": False, "low_resource": False, "theme": "light"},

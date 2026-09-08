@@ -34,7 +34,7 @@ async def test_fullscreen_monitor_picker_applies_normalized_roi_directly(monkeyp
     presenter = SimpleNamespace(
         app=SimpleNamespace(current=App()),
         window=SimpleNamespace(monitor=SimpleNamespace(preview=Preview())),
-        run=lambda coroutine: scheduled.append(coroutine),
+        run=lambda coroutine, success=None: scheduled.append(coroutine),
         on_event=lambda *_: None,
     )
 

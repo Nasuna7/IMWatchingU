@@ -26,6 +26,7 @@ from .pages.records_page import RecordsPage
 from .pages.send_config_page import SendConfigPage
 from .pages.settings_page import SettingsPage
 from .widgets.controls import GlowSurface, TitleBar, label
+from .widgets.toasts import ToastStack
 
 
 class MainWindow(QMainWindow):
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         install(app, settings.values["appearance"].get("theme", "light"))
         app.setProperty("reduce_motion", settings.values["appearance"]["reduce_motion"])
         self.setWindowTitle("IMWatchingU❤")
-        self.setWindowIcon(icon("app"))
+        self.setWindowIcon(icon("app", "#292A2C"))
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setMinimumSize(960, 640)
         area = QApplication.primaryScreen().availableGeometry()
@@ -124,7 +125,8 @@ class MainWindow(QMainWindow):
         outer.addLayout(layout, 1)
         self.navigation.currentRowChanged.connect(self.change_page)
         self.navigation.setCurrentRow(0)
-        self.tray = QSystemTrayIcon(icon("app"), self)
+        self.toasts = ToastStack(self)
+        self.tray = QSystemTrayIcon(self.windowIcon(), self)
         menu = QMenu(self)
         for title, handler in [
             ("恢复窗口", self.restore),

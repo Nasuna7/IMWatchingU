@@ -303,11 +303,13 @@ class TaskDelegate(QStyledItemDelegate):
         focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
         rect = QRectF(option.rect).adjusted(0, 2, -10, -5)
         c = colors()
-        painter.setBrush(QColor(c["tint"] if selected else c["surface"]))
-        painter.setPen(QPen(QColor(c["orange"] if selected or focused else c["line"]), 1))
+        running = index.data().split(" · ", 2)[1:2] == ["运行"]
+        painter.setBrush(QColor(c["green_bg"] if running else c["tint"] if selected else c["surface"]))
+        border = c["orange"] if selected or focused else c["green"] if running else c["line"]
+        painter.setPen(QPen(QColor(border), 2 if selected else 1))
         painter.drawRoundedRect(rect, 11, 11)
         parts = index.data().split(" · ", 2)
-        name = parts[0]
+        name = parts[0] + ("  ·  运行中" if running else "")
         status = parts[1] if len(parts) > 1 else "停止"
         source = parts[2] if len(parts) > 2 else "未选择来源"
         painter.setPen(Qt.PenStyle.NoPen)

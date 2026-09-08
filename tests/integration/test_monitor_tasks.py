@@ -140,8 +140,8 @@ async def test_monitor_tasks_persist_and_restore_window_by_process_name(tmp_path
     manager = MonitorTasks(factory, lambda *event: None, lambda: [], lambda configs: saved.append(configs))
     await manager.current.select_source(first_source, (0.1, 0.2, 0.3, 0.4))
     manager.current.image_roi = (0.2, 0.3, 0.4, 0.5)
-    manager.current.keywords = True
-    manager.current.flash_enabled = True
+    await manager.set_options(manager.selected, True, True)
+    await manager.current.stop()
     manager.persist()
 
     restored = MonitorTasks(factory, lambda *event: None, lambda: saved[-1], lambda configs: saved.append(configs))

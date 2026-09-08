@@ -10,6 +10,7 @@ from uuid import uuid4
 import mss
 from PIL import Image
 
+from screen_qq_ocr.application.ports import CaptureNotReady
 from screen_qq_ocr.domain.models import FrameSnapshot
 
 from .coordinates import pixel_box
@@ -105,12 +106,14 @@ class Capture:
         self.closed = False
         self.generation = 0
         self.screen = None
+        self.roi = (0, 0, 1, 1)
 
     def open(self, source):
         self.close()
         self.source = source
         self.closed = False
         self.latest = None
+        self.roi = (0, 0, 1, 1)
         if source.kind == "monitor":
             self.screen = mss.mss()
         if source.kind == "window":
@@ -133,11 +136,25 @@ class Capture:
 
             @capture.event
             def on_frame_arrived(frame, capture_control):
-                # Copy at callback boundary; WGC reuses its original buffer.
-                image = Image.fromarray(frame.convert_to_bgr().frame_buffer[:, :, ::-1].copy())
+                # Copy at callback boundary; WGC reuses its original buffer. Keep only the
+                # configured ROI while monitoring so a changing 4K window does not force a
+                # full-frame Python copy on every WGC frame.
+                with self.lock:
+                    requested_roi = self.roi
+                buffer = frame.convert_to_bgr().frame_buffer
+                height, width = buffer.shape[:2]
+                left, top, right, bottom = pixel_box(requested_roi, width, height)
+                image = Image.fromarray(buffer[top:bottom, left:right, ::-1].copy())
                 with self.lock:
                     if generation == self.generation:
-                        self.latest = (image, time.monotonic(), str(uuid4()), datetime.now().astimezone())
+                        self.latest = (
+                            image,
+                            time.monotonic(),
+                            str(uuid4()),
+                            datetime.now().astimezone(),
+                            requested_roi,
+                            (width, height),
+                        )
 
             @capture.event
             def on_closed():
@@ -147,7 +164,13 @@ class Capture:
             self.control = capture.start_free_threaded()
             self.wgc = capture
 
+    def set_roi(self, roi):
+        with self.lock:
+            self.roi = tuple(roi)
+
     def grab(self, session, roi=(0, 0, 1, 1)):
+        requested_roi = tuple(roi)
+        self.set_roi(requested_roi)
         frame_id = str(uuid4())
         capture_time = datetime.now().astimezone()
         capture_monotonic = time.monotonic()
@@ -157,9 +180,16 @@ class Capture:
             left, top, width, height = self.source.metadata
             capture = self.screen or mss.mss()
             self.screen = capture
-            spec = dict(left=left, top=top, width=width, height=height)
-            if not any(all(m.get(k) == v for k, v in spec.items()) for m in capture.monitors[1:]):
+            monitor_spec = dict(left=left, top=top, width=width, height=height)
+            if not any(all(m.get(k) == v for k, v in monitor_spec.items()) for m in capture.monitors[1:]):
                 raise ValueError("显示器已断开或分辨率变化，请重新选择")
+            box_left, box_top, box_right, box_bottom = pixel_box(requested_roi, width, height)
+            spec = dict(
+                left=left + box_left,
+                top=top + box_top,
+                width=box_right - box_left,
+                height=box_bottom - box_top,
+            )
             shot = capture.grab(spec)
             image = Image.frombytes("RGB", shot.size, shot.rgb)
         else:
@@ -184,10 +214,18 @@ class Capture:
             with self.lock:
                 # WGC only delivers changed frames. A static window is still a valid source.
                 if not self.latest:
-                    raise ValueError("窗口尚无有效画面，请重试")
-                image = self.latest[0].copy()
-                capture_monotonic, frame_id, capture_time = self.latest[1:]
-        image = image.crop(pixel_box(roi, *image.size))
+                    raise CaptureNotReady("窗口尚无有效画面，请重试")
+                latest = self.latest
+            image = latest[0]
+            capture_monotonic, frame_id, capture_time = latest[1:4]
+            latest_roi = latest[4] if len(latest) > 4 else (0, 0, 1, 1)
+            latest_size = latest[5] if len(latest) > 5 else image.size
+            if latest_roi == requested_roi:
+                image = image.copy()
+            elif latest_roi == (0, 0, 1, 1):
+                image = image.crop(pixel_box(requested_roi, *latest_size))
+            else:
+                raise CaptureNotReady("窗口画面尚未同步到新的监控区域，请重试")
         if image.getextrema() == ((0, 0), (0, 0), (0, 0)):
             raise ValueError("采集到黑帧，已暂停，请检查受保护内容或采集源")
         return FrameSnapshot(

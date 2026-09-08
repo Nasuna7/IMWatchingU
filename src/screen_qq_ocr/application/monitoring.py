@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 
+from screen_qq_ocr.application.ports import CaptureNotReady
 from screen_qq_ocr.domain.flash import FlashDetector
 from screen_qq_ocr.domain.matching import match
 from screen_qq_ocr.domain.models import SendTask
@@ -21,6 +22,8 @@ class Monitoring:
         self.active = False
         self.keywords = False
         self.flash_enabled = False
+        self.configured_keywords = True
+        self.configured_flash = False
         self.last_result = None
         self.last_frame = None
         self.last_preview = None
@@ -30,6 +33,7 @@ class Monitoring:
         self.source = None
         self.ocr_task = None
         self.capture_task = None
+        self.capture_open = False
         self.next_ocr = 0
         self.next_preview = 0
         self.last_ocr_signature = None
@@ -52,44 +56,73 @@ class Monitoring:
             raise ValueError("请先选择采集源")
         await self.stop()
         self.last_result = self.last_frame = self.last_preview = None
-        if source != self.source:
-            self.source = None
-            await self.capture_call(self.capture.open, source)
+        self.source = source
+        await self.open_capture()
         self.roi = roi
-        # WGC first frame may arrive asynchronously. Source selection captures one static preview;
-        # continuous preview refresh still only happens after monitoring starts.
-        for attempt in range(40):
-            try:
-                frame = await self.grab_frame(force_preview=True)
-                self.source = source
-                self.last_frame = frame
-                self.emit("roi", roi)
-                self.emit("capture_status", "采集已就绪")
-                return
-            except ValueError:
-                if attempt == 39:
-                    self.source = None
-                    raise
-                await asyncio.sleep(0.15)
+        # read_capture waits for WGC's first frame before publishing the static preview.
+        try:
+            frame = await self.grab_frame(force_preview=True)
+            self.last_frame = frame
+            self.emit("roi", roi)
+            self.emit("capture_status", "采集已就绪")
+        except ValueError:
+            self.source = None
+            raise
+        finally:
+            if not self.active:
+                await self.close_capture()
 
     async def capture_call(self, function, *args):
         return await asyncio.get_running_loop().run_in_executor(
             self.capture_executor, partial(function, *args)
         )
 
+    async def open_capture(self):
+        if not self.source:
+            raise ValueError("请先选择采集源")
+        if not self.capture_open:
+            await self.capture_call(self.capture.open, self.source)
+            self.capture_open = True
+
+    async def close_capture(self):
+        if self.capture_open:
+            await self.capture_call(self.capture.close)
+            self.capture_open = False
+
+    async def configure_capture_roi(self, roi):
+        setter = getattr(self.capture, "set_roi", None)
+        if setter:
+            await self.capture_call(setter, tuple(roi))
+
+    async def read_capture(self, roi):
+        # Opening WGC and switching its ROI are asynchronous. Only retry missing
+        # frames; closed/minimized sources and other capture errors remain fatal.
+        for attempt in range(40):
+            try:
+                return await self.capture_call(self.capture.grab, self.session, roi)
+            except CaptureNotReady:
+                if attempt == 39:
+                    raise
+                await asyncio.sleep(0.15)
+
     async def grab_frame(self, force_preview=False):
+        await self.open_capture()
         now = time.monotonic()
         interval = 0.5 if self.settings.values["appearance"]["low_resource"] else 0.2
         preview_due = force_preview or now >= self.next_preview
         if preview_due:
-            full = await self.capture_call(self.capture.grab, self.session, (0, 0, 1, 1))
+            full = await self.read_capture((0, 0, 1, 1))
             self.last_preview = full
             self.emit("frame", full)
             self.next_preview = now + interval
             if self.roi == (0, 0, 1, 1):
                 return full
             return self.crop_snapshot(full, self.roi)
-        return await self.capture_call(self.capture.grab, self.session, self.roi)
+        return await self.grab_monitor_frame()
+
+    async def grab_monitor_frame(self):
+        await self.open_capture()
+        return await self.read_capture(self.roi)
 
     def crop_snapshot(self, frame, roi):
         from PIL import Image
@@ -147,6 +180,7 @@ class Monitoring:
         return reasons
 
     async def start(self, keywords, flash):
+        self.configured_keywords, self.configured_flash = bool(keywords), bool(flash)
         if not self.source:
             raise ValueError("请先选择并验证采集源")
         if not keywords and not flash:
@@ -157,6 +191,8 @@ class Monitoring:
             if reasons:
                 raise ValueError("；".join(reasons))
         await self.stop()
+        await self.open_capture()
+        await self.configure_capture_roi(self.roi)
         if keywords:
             await self.ocr_worker.availability(self.settings.values["ocr"])
             await self.release_ocr_if_idle()
@@ -182,6 +218,7 @@ class Monitoring:
         self.capture_task = None
         self.emit("sound_stop", None)
         self.emit("monitor_status", "停止")
+        await self.close_capture()
         if not self.ocr_task and hasattr(self.ocr_worker, "shutdown"):
             await self.ocr_worker.shutdown()
 
@@ -197,7 +234,8 @@ class Monitoring:
         next_flash = 0
         try:
             while self.active:
-                frame = await self.grab_frame()
+                started_at = time.monotonic()
+                frame = await self.grab_monitor_frame()
                 self.last_frame = frame
                 now = time.monotonic()
                 if self.flash_enabled and now >= next_flash:
@@ -206,13 +244,14 @@ class Monitoring:
                     self.emit("flash", (color, self.flash.changes, alarm))
                     if alarm:
                         self.emit("sound", self.settings.values["flash"]["sound"])
-                    next_flash = now + 0.25
+                    next_flash = now + self.read_interval()
                 if self.keywords and now >= self.next_ocr and not self.ocr_task:
                     if self.mark_changed_for_ocr(frame):
                         self.ocr_task = asyncio.create_task(self._recognize(frame, automatic=True))
                     else:
                         self.next_ocr = now + self.ocr_interval()
-                await asyncio.sleep(1 / (8 if self.settings.values["appearance"]["low_resource"] else 15))
+                elapsed = time.monotonic() - started_at
+                await asyncio.sleep(max(0, self.read_interval() - elapsed))
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -231,9 +270,22 @@ class Monitoring:
         if self.active:
             frame = await self.grab_frame(force_preview=True)
         else:
-            frame = await self.capture_call(self.capture.grab, self.session, self.roi)
+            await self.open_capture()
+            try:
+                frame = await self.read_capture(self.roi)
+            finally:
+                await self.close_capture()
         self.last_frame = frame
         self.ocr_task = asyncio.create_task(self._recognize(frame, automatic=False))
+
+    async def refresh_preview(self):
+        try:
+            self.last_frame = await self.grab_frame(force_preview=True)
+        finally:
+            if self.active:
+                await self.configure_capture_roi(self.roi)
+            else:
+                await self.close_capture()
 
     async def _recognize(self, frame, automatic):
         epoch = self.policy_epoch
@@ -245,6 +297,8 @@ class Monitoring:
             self.last_result = result
             self.emit("ocr", result)
             self.emit("ocr_status", "OCR 已就绪")
+            if not automatic:
+                self.emit("toast", "识别完成" if result.text.strip() else "识别完成，未发现文字")
             if automatic and self.active and self.keywords and epoch == self.policy_epoch:
                 for rule in self.rules:
                     if not rule.enabled:
@@ -278,6 +332,7 @@ class Monitoring:
                 return
             self.emit("error", str(error))
             if automatic:
+                self.last_ocr_signature = None
                 self.triggers.reset_continuity()
                 self.failures += 1
                 if self.failures >= 3:
@@ -291,6 +346,9 @@ class Monitoring:
 
     def ocr_interval(self):
         return self.settings.values["ocr"]["interval"]
+
+    def read_interval(self):
+        return max(0.2, float(self.settings.values.get("capture", {}).get("read_interval", 5)))
 
     def keep_ocr_worker_alive(self):
         return self.active and self.keywords and self.settings.values["lifecycle"].get("close_to_tray", True)
@@ -443,5 +501,5 @@ class Monitoring:
             await asyncio.gather(self.ocr_task, return_exceptions=True)
         if hasattr(self.ocr_worker, "shutdown"):
             await self.ocr_worker.shutdown()
-        await self.capture_call(self.capture.close)
+        await self.close_capture()
         self.capture_executor.shutdown(wait=False)

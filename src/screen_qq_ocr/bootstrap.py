@@ -75,6 +75,7 @@ def main():
     try:
         settings = Settings(data_dir / "settings.json")
         database = Database(data_dir / "app.db")
+        database.select_account("")
     except Exception as error:
         QMessageBox.critical(None, "数据加载失败", str(error))
         return

@@ -44,31 +44,40 @@ class Presenter(QObject):
             lambda _: setattr(self, "selected_source", monitor.sources.currentData())
         )
         monitor.refresh.clicked.connect(lambda: self.run(self.refresh_sources()))
+        monitor.refresh_preview.clicked.connect(lambda: self.run(app.current.refresh_preview(), "画面已刷新"))
         monitor.select.clicked.connect(
-            lambda: self.run(app.current.select_source(monitor.sources.currentData()))
+            lambda: self.run(app.current.select_source(monitor.sources.currentData()), "采集来源已更新")
         )
         monitor.pick_roi.clicked.connect(lambda: self.pick_roi("monitor"))
         monitor.pick_image_roi.clicked.connect(lambda: self.pick_roi("image"))
-        monitor.clear_roi.clicked.connect(lambda: self.run(app.current.set_roi((0, 0, 1, 1))))
-        monitor.clear_image_roi.clicked.connect(lambda: self.run(app.current.set_image_roi((0, 0, 1, 1))))
+        monitor.clear_roi.clicked.connect(
+            lambda: self.run(app.current.set_roi((0, 0, 1, 1)), "监控区域已重置")
+        )
+        monitor.clear_image_roi.clicked.connect(
+            lambda: self.run(app.current.set_image_roi((0, 0, 1, 1)), "截图区域已重置")
+        )
         monitor.preview.roi_selected.connect(
             lambda roi: self.run(self.roi(roi, app.current, monitor.preview.pending_revision))
         )
-        monitor.add_task.clicked.connect(lambda: self.run(app.add()))
-        monitor.remove_task.clicked.connect(lambda: self.run(app.remove(monitor.tasks.currentData())))
+        monitor.add_task.clicked.connect(lambda: self.run(app.add(), "任务已新增"))
+        monitor.remove_task.clicked.connect(
+            lambda: self.run(app.remove(monitor.tasks.currentData()), "任务已删除")
+        )
         monitor.tasks.currentIndexChanged.connect(
             lambda _: self.run(app.select_task(monitor.tasks.currentData()))
         )
-        monitor.stop_all.clicked.connect(lambda: self.run(app.stop_all()))
+        monitor.stop_all.clicked.connect(lambda: self.run(app.stop_all(), "全部任务已停止"))
+        for option in (monitor.keywords, monitor.flash):
+            option.toggled.connect(self.save_monitor_options)
         monitor.start.clicked.connect(
             lambda: self.run(self.start_monitor(monitor.keywords.isChecked(), monitor.flash.isChecked()))
         )
-        monitor.stop.clicked.connect(lambda: self.run(app.stop()))
+        monitor.stop.clicked.connect(lambda: self.run(app.stop(), "监控已停止"))
         window.stop_requested.connect(lambda: self.run(app.stop_all()))
         monitor.once.clicked.connect(lambda: self.run(app.recognize_once()))
-        monitor.cancel.clicked.connect(lambda: self.run(self.cancel()))
-        window.keywords.save.connect(lambda rule: self.run(app.save_rule(rule)))
-        window.keywords.delete.connect(lambda rule_id: self.run(app.delete_rule(rule_id)))
+        monitor.cancel.clicked.connect(lambda: self.run(self.cancel(), "待发送任务已取消"))
+        window.keywords.save.connect(lambda rule: self.run(self.save_rule(rule)))
+        window.keywords.delete.connect(lambda rule_id: self.run(app.delete_rule(rule_id), "关键词已删除"))
         window.keywords.error.connect(lambda message: self.on_event("error", message))
         window.keywords.import_clicked.connect(self.import_file)
         window.keywords.export_clicked.connect(self.export_file)
@@ -104,18 +113,36 @@ class Presenter(QObject):
         )
         self.run(self.initialize())
 
-    def run(self, coroutine):
+    def run(self, coroutine, success=None):
         async def guarded():
             try:
-                return await coroutine
+                result = await coroutine
+                if success:
+                    self.emit("toast", success)
+                return result
             except Exception as error:
                 self.emit("error", str(error))
 
         return self.loop.submit(guarded())
 
+    def save_monitor_options(self):
+        monitor = self.window.monitor
+        self.run(
+            self.app.set_options(
+                monitor.tasks.currentData(), monitor.keywords.isChecked(), monitor.flash.isChecked()
+            ),
+            "监控选项已保存，下次启动生效",
+        )
+
+    async def save_rule(self, rule):
+        await self.app.save_rule(rule)
+        self.emit("rule_saved", rule)
+        self.emit("toast", "关键词已应用")
+
     async def start_monitor(self, keywords, flash):
         try:
             await self.app.start(keywords, flash)
+            self.emit("toast", "监控已启动")
         except ValueError as error:
             message = str(error)
             if keywords and Presenter._is_qq_start_block(message):
@@ -207,10 +234,10 @@ class Presenter(QObject):
         if selected is None:
             return
         if kind == "monitor":
-            self.run(app.set_roi(selected))
+            self.run(app.set_roi(selected), "监控区域已应用")
         else:
             self.window.monitor.preview.set_image_roi(selected)
-            self.run(app.set_image_roi(selected))
+            self.run(app.set_image_roi(selected), "截图区域已应用")
 
     async def cancel(self):
         self.app.queue.cancel()
@@ -218,16 +245,23 @@ class Presenter(QObject):
     async def connect_qq(self, url, token):
         await self.app.stop_all()
         info, targets = await self.qq_service.connect(url, token)
+        await asyncio.to_thread(self.app.store.select_account, str(info["user_id"]))
+        await self.app.reload()
         await asyncio.to_thread(self.credentials.save, "onebot", token)
         self.emit("account", info)
         self.emit("targets", targets)
         self.emit("qq_status", "QQ：可发送")
+        self.emit("toast", "QQ登录成功")
         return info, targets
 
     async def disconnect(self):
         await self.app.pause_keywords()
         await self.qq_service.disconnect()
+        await asyncio.to_thread(self.app.store.select_account, "")
+        self.emit("account_cleared", None)
+        await self.app.reload()
         self.emit("qq_status", "QQ：离线")
+        self.emit("toast", "QQ已断开")
 
     async def login(self, url, token):
         if self.login_poll:
@@ -280,7 +314,7 @@ class Presenter(QObject):
         try:
             policy = self.window.send.editor.value()
             self.invalidate_preview()
-            self.run(self.app.save_policy(policy))
+            self.run(self.app.save_policy(policy), "发送配置已应用")
         except ValueError as error:
             self.on_event("error", str(error))
 
@@ -527,6 +561,9 @@ class Presenter(QObject):
 
     def on_event(self, kind, value):
         w = self.window
+        if kind in ("toast", "info", "error", "start_blocked") and hasattr(w, "toasts"):
+            message = str(value).splitlines()[0]
+            w.toasts.show(message[:80], error=kind in ("error", "start_blocked"))
         if kind in w.status_labels:
             w.status_labels[kind].setText(value)
         elif kind == "credentials":
@@ -582,8 +619,10 @@ class Presenter(QObject):
             w.monitor.ocr.clear()
             w.monitor.meta.setText("尚无识别结果")
             w.monitor.flash_state.setText("色块：等待采样")
-            w.monitor.keywords.setChecked(keywords)
-            w.monitor.flash.setChecked(flash)
+            for option, checked in ((w.monitor.keywords, keywords), (w.monitor.flash, flash)):
+                option.blockSignals(True)
+                option.setChecked(checked)
+                option.blockSignals(False)
             if source:
                 w.monitor.sources.setCurrentIndex(w.monitor.sources.findData(source))
         elif kind == "rules":
@@ -593,6 +632,8 @@ class Presenter(QObject):
             for rule in value:
                 w.send.rule.addItem(rule.keyword, rule.id)
             w.send.rule.setCurrentIndex(max(0, w.send.rule.findData(selected)))
+        elif kind == "rule_saved":
+            w.keywords.saved(value)
         elif kind == "policy":
             w.send.editor.load(value)
             self.invalidate_preview()
@@ -624,6 +665,16 @@ class Presenter(QObject):
             w.records.appendPlainText(value)
         elif kind == "account":
             w.qq.account.setText(f"{value.get('nickname', '')} · QQ {value['user_id']}")
+            if w.keywords.policy.account_id != str(value["user_id"]):
+                w.keywords.editor.reject()
+                w.keywords.editing = None
+            for editor in (w.send.editor, w.keywords.policy):
+                editor.set_account(str(value["user_id"]))
+        elif kind == "account_cleared":
+            w.keywords.editor.reject()
+            w.keywords.editing = None
+            for editor in (w.send.editor, w.keywords.policy):
+                editor.set_account("")
         elif kind == "targets":
             w.send.editor.set_targets(value)
             w.keywords.policy.set_targets(value)

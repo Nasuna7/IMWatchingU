@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from screen_qq_ocr.application.monitoring import Monitoring
+from screen_qq_ocr.application.ports import CaptureNotReady
 from screen_qq_ocr.application.sending import SendQueue
 from screen_qq_ocr.domain.models import KeywordRule, OcrLine, OcrResult, SendPolicy
 from screen_qq_ocr.infrastructure.persistence.database import Database
@@ -15,8 +16,11 @@ class Capture:
         self.frame = frame
         self.counter = 0
         self.source = None
+        self.opens = 0
+        self.closes = 0
 
     def open(self, source):
+        self.opens += 1
         self.source = source
 
     def grab(self, session, roi):
@@ -24,7 +28,7 @@ class Capture:
         return replace(self.frame, session_id=session, frame_id=str(self.counter))
 
     def close(self):
-        pass
+        self.closes += 1
 
 
 class RoiAwareCapture(Capture):
@@ -36,6 +40,7 @@ class RoiAwareCapture(Capture):
         self.rois.append(roi)
         if roi == (0, 0, 1, 1):
             return super().grab(session, roi)
+        self.counter += 1
         x, y, w, h = roi
         width = round(self.frame.width * w)
         height = round(self.frame.height * h)
@@ -88,7 +93,7 @@ def create(tmp_path, frame, target, ocr):
         messaging,
         db,
         Settings(tmp_path / "settings.json"),
-        lambda frame: "红",
+        lambda frame: "red",
         lambda kind, value: events.append((kind, value)),
     )
     app.source = "synthetic"
@@ -171,6 +176,9 @@ async def test_select_source_captures_static_preview_without_touching_ocr(tmp_pa
     assert app.source is not None
     assert app.last_preview is not None
     assert app.last_frame is not None
+    assert app.capture.opens == 1
+    assert app.capture.closes == 1  # Idle source selection releases WGC after the static preview.
+    assert not app.capture_open
     assert ocr.calls == 0
     assert [kind for kind, _ in events].count("frame") == 1
 
@@ -197,6 +205,7 @@ async def test_inactive_recognize_once_does_not_update_preview(tmp_path, frame, 
     await app.ocr_task
 
     assert ocr.frames[0].width == frame.width // 2
+    assert not app.capture_open
     assert not any(kind == "frame" for kind, _ in events)
 
 
@@ -224,6 +233,27 @@ async def test_grab_frame_throttles_live_preview_events(tmp_path, frame, target)
     await app.grab_frame()
 
     assert [kind for kind, _ in events].count("frame") == 1
+
+
+async def test_capture_loop_reads_monitor_roi_on_configured_interval(tmp_path, frame, target):
+    source = replace(frame, width=100, height=80, rgb=bytes([255, 0, 0]) * 8000)
+    ocr = Ocr()
+    app, events = create(tmp_path, source, target, ocr)
+    capture = RoiAwareCapture(source)
+    app.capture = capture
+    app.roi = (0.2, 0.25, 0.5, 0.5)
+    app.settings.values["capture"]["read_interval"] = 0.2
+
+    await app.start(False, True)
+    await asyncio.sleep(0.46)
+    await app.stop()
+
+    assert 1 <= len(capture.rois) <= 4
+    assert all(roi == (0.2, 0.25, 0.5, 0.5) for roi in capture.rois)
+    assert not any(kind == "frame" for kind, _ in events)
+    assert app.last_frame.width == 50
+    assert app.last_frame.height == 40
+    assert ocr.calls == 0
 
 
 def test_automatic_ocr_requires_frame_change(tmp_path, frame, target):
@@ -310,3 +340,69 @@ async def test_three_ocr_errors_keep_flash_running(tmp_path, frame, target):
     for i in range(3):
         await app._recognize(replace(frame, session_id=app.session, frame_id=str(i)), True)
     assert not app.keywords and app.flash_enabled and app.active
+
+
+async def wait_until(predicate):
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+class DelayedCapture(Capture):
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.waits = 2
+
+    def grab(self, session, roi):
+        if self.waits:
+            self.waits -= 1
+            raise CaptureNotReady("窗口尚无有效画面，请重试")
+        return super().grab(session, roi)
+
+
+async def test_automatic_ocr_waits_for_first_frame_and_publishes_changes(tmp_path, frame, target):
+    ocr = Ocr(lines=(OcrLine("无关键词", 0, 0, 10, 10),))
+    app, events = create(tmp_path, frame, target, ocr)
+    app.capture = DelayedCapture(frame)
+    app.settings.values["capture"]["read_interval"] = 0.2
+    app.settings.values["ocr"]["interval"] = 0
+    try:
+        await app.start(True, False)
+        await wait_until(lambda: len([e for e in events if e[0] == "ocr"]) == 1)
+        assert app.active and not app.queue.pending
+        await asyncio.sleep(0.45)
+        assert ocr.calls == 1
+        app.capture.frame = replace(frame, rgb=bytes([0, 255, 0]) * frame.width * frame.height)
+        await wait_until(lambda: len([e for e in events if e[0] == "ocr"]) == 2)
+        assert app.last_result.frame.rgb == app.capture.frame.rgb
+        assert not any(kind == "error" for kind, _ in events)
+    finally:
+        await app.shutdown()
+
+
+async def test_manual_ocr_waits_for_reopened_capture(tmp_path, frame, target):
+    app, events = create(tmp_path, frame, target, Ocr())
+    app.capture = DelayedCapture(frame)
+    try:
+        await app.recognize_once()
+        await app.ocr_task
+        assert app.last_result.text == "Cerb"
+        assert not app.capture_open
+    finally:
+        await app.shutdown()
+
+
+async def test_automatic_ocr_retries_failed_unchanged_frame(tmp_path, frame, target):
+    ocr = Ocr(fail=True)
+    app, events = create(tmp_path, frame, target, ocr)
+    app.settings.values["capture"]["read_interval"] = 0.2
+    app.settings.values["ocr"]["interval"] = 0
+    try:
+        await app.start(True, True)
+        await wait_until(lambda: not app.keywords)
+        assert ocr.calls == 3
+        assert app.active and app.flash_enabled
+        assert len([e for e in events if e[0] == "error"]) == 3
+    finally:
+        await app.shutdown()
+

@@ -3,6 +3,10 @@ from typing import Protocol
 from screen_qq_ocr.domain.models import FrameSnapshot, OcrResult, QQTarget, SendReceipt
 
 
+class CaptureNotReady(ValueError):
+    """The capture stream is open but its requested frame has not arrived yet."""
+
+
 class OcrPort(Protocol):
     def recognize(self, frame: FrameSnapshot) -> OcrResult: ...
 

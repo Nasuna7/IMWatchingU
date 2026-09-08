@@ -101,6 +101,8 @@ class MonitorTasks:
         app.image_roi = tuple(config.get("image_roi") or (0, 0, 1, 1))
         app.keywords = bool(config.get("keywords", True))
         app.flash_enabled = bool(config.get("flash", False))
+        app.configured_keywords = app.keywords
+        app.configured_flash = app.flash_enabled
         app.saved_source = config.get("source")
         self.tasks[task_id] = (name, app)
         self.selected = task_id
@@ -113,8 +115,8 @@ class MonitorTasks:
                 "source": _source_ref(app.source) or getattr(app, "saved_source", None),
                 "roi": list(app.roi),
                 "image_roi": list(app.image_roi),
-                "keywords": bool(app.keywords),
-                "flash": bool(app.flash_enabled),
+                "keywords": app.configured_keywords,
+                "flash": app.configured_flash,
             }
             for task_id, (name, app) in self.tasks.items()
         ]
@@ -122,6 +124,13 @@ class MonitorTasks:
     def persist(self):
         if not self.loading:
             self.save_configs(self.configs())
+
+    async def set_options(self, task_id, keywords, flash):
+        if task_id not in self.tasks:
+            return
+        app = self.tasks[task_id][1]
+        app.configured_keywords, app.configured_flash = bool(keywords), bool(flash)
+        self.persist()
 
     def publish_tasks(self):
         self.emit(
@@ -166,7 +175,7 @@ class MonitorTasks:
         app = self.current
         self.emit(
             "monitor_selected",
-            (app.roi, app.image_roi, app.keywords, app.flash_enabled, app.source),
+            (app.roi, app.image_roi, app.configured_keywords, app.configured_flash, app.source),
         )
         if app.last_preview:
             self.emit("frame", app.last_preview)

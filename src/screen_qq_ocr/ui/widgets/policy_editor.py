@@ -22,6 +22,7 @@ class PolicyEditor(QTabWidget):
         self.fields = {}
         self.target_value = None
         self.target_values = ()
+        self.account_id = None
         conditions = QWidget()
         form = QFormLayout(conditions)
         for key, label, maximum in (("confirm_frames", "连续确认帧数", 10), ("cooldown", "冷却秒数", 86400)):
@@ -100,8 +101,20 @@ class PolicyEditor(QTabWidget):
             if self.target.item(i).checkState() == Qt.CheckState.Checked
         )
 
-    def set_targets(self, targets):
-        selected = self.selected_targets() or tuple(self.target_values)
+    def set_account(self, account_id):
+        if self.account_id == account_id:
+            return
+        self.account_id = account_id
+        self.target.clear()
+        self.target_value = None
+        self.target_values = ()
+
+    def set_targets(self, targets, selected=None):
+        if selected is None:
+            selected = self.selected_targets()
+        if self.account_id is not None:
+            targets = [t for t in targets if t and t.account_id == self.account_id]
+            selected = tuple(t for t in selected if t.account_id == self.account_id)
         self.target.clear()
         for target in targets:
             if target is None:
@@ -138,7 +151,8 @@ class PolicyEditor(QTabWidget):
         self.target_value = value.target
         self.target_values = tuple(value.targets or ()) or ((value.target,) if value.target else ())
         self.set_targets(
-            [self.target.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.target.count())]
+            [self.target.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.target.count())],
+            selected=self.target_values,
         )
 
     def value(self):

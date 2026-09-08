@@ -1,4 +1,12 @@
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QGridLayout,
+    QHBoxLayout,
+    QPlainTextEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from screen_qq_ocr.ui.widgets.controls import Card, ComboBox, TaskSelector, button, label
 from screen_qq_ocr.ui.widgets.preview import Preview
@@ -27,22 +35,28 @@ class MonitorPage(QWidget):
         self.sources = ComboBox()
         self.refresh = button("刷新", glyph="refresh")
         self.select = button("使用来源")
-        source.addWidget(self.sources, 1)
+        self.refresh_preview = button("刷新画面", glyph="refresh")
+        self.sources.setMinimumWidth(0)
+        self.sources.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        preview_card.body.addWidget(self.sources)
         source.addWidget(self.refresh)
         source.addWidget(self.select)
+        source.addWidget(self.refresh_preview)
+        source.addStretch()
         preview_card.body.addLayout(source)
         self.preview = Preview()
         self.preview.editable = False
         preview_card.body.addWidget(self.preview, 1)
-        actions = QHBoxLayout()
+        actions = QGridLayout()
         self.pick_roi = button("选择监控区域", glyph="crop")
         self.pick_image_roi = button("选择截图区域", glyph="crop")
         self.clear_roi = button("重置监控区域", glyph="crop")
         self.clear_image_roi = button("重置截图区域", glyph="crop")
         self.once = button("识别一次")
-        for widget in (self.pick_roi, self.pick_image_roi, self.clear_roi, self.clear_image_roi, self.once):
-            actions.addWidget(widget)
-        actions.addStretch()
+        for index, widget in enumerate(
+            (self.pick_roi, self.pick_image_roi, self.once, self.clear_roi, self.clear_image_roi)
+        ):
+            actions.addWidget(widget, index // 3, index % 3)
         preview_card.body.addLayout(actions)
         content.addWidget(preview_card, 3)
         inspector = QVBoxLayout()
